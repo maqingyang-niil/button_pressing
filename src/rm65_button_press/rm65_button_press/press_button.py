@@ -10,6 +10,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rm_ros_interfaces.msg import Gripperset, Movel
 from std_msgs.msg import Bool
 
+from rm65_button_press.capture_handshake import validate_capture_pose_metadata
 from rm65_button_press.geometry import (
     compute_press_targets,
     normalize_quaternion,
@@ -51,6 +52,10 @@ class PressButton(Node):
             'ctag_result_topic', '/rm_driver/set_ctag_gripper_position_result').value)
         self.trigger_topic = str(self.declare_parameter(
             'trigger_topic', '/ibvs/capture_trigger').value)
+        self.capture_success_topic = str(self.declare_parameter(
+            'capture_success_topic', '/ibvs/capture_success').value)
+        self.expected_button_frame = str(self.declare_parameter(
+            'expected_button_frame', 'base_link').value)
         self.trigger_on_start = bool(
             self.declare_parameter('trigger_on_start', True).value)
 
@@ -80,9 +85,10 @@ class PressButton(Node):
         self.press_timeout = float(self.declare_parameter('press_timeout', 20.0).value)
         self.stationary_timeout = float(
             self.declare_parameter('stationary_timeout', 3.0).value)
-
-        self.latch_ignore_window = float(
-            self.declare_parameter('latch_ignore_window', 0.5).value)
+        self.vision_wait_timeout = float(
+            self.declare_parameter('vision_wait_timeout', 10.0).value)
+        self.pose_stamp_tolerance = float(
+            self.declare_parameter('pose_stamp_tolerance', 0.5).value)
         self.max_flange_radius = float(
             self.declare_parameter('max_flange_radius', 0.61).value)
         self.max_normal_tilt_deg = float(
@@ -122,6 +128,13 @@ class PressButton(Node):
 
         self.create_subscription(
             PoseStamped, self.button_pose_topic, self.on_button_pose, pose_qos)
+        status_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.create_subscription(
+            Bool, self.capture_success_topic, self.on_capture_success, status_qos)
         self.create_subscription(
             Pose, self.current_pose_topic, self.on_current_pose, 10)
         self.create_subscription(
@@ -137,8 +150,12 @@ class PressButton(Node):
         self.current_pose_time = None
         self.pending_pose = None
         self.pending_pose_time = None
-        self.first_pose_stamp = None
-        self.baseline_stamp = None
+        self.last_pose_stamp = None
+        self.trigger_baseline_stamp = None
+        self.trigger_stamp_ns = None
+        self.trigger_sent = False
+        self.capture_result = None
+        self.capture_wait_start = None
 
         self.movel_result = None
         self.gripper_any_success = False
@@ -187,6 +204,14 @@ class PressButton(Node):
             raise ValueError('gripper_close_interval must be >= 0')
         if self.position_tolerance <= 0.0 or self.press_position_tolerance <= 0.0:
             raise ValueError('position tolerances must be > 0')
+        if not self.capture_success_topic:
+            raise ValueError('capture_success_topic must not be empty')
+        if not self.expected_button_frame:
+            raise ValueError('expected_button_frame must not be empty')
+        if self.vision_wait_timeout <= 0.0:
+            raise ValueError('vision_wait_timeout must be > 0')
+        if self.pose_stamp_tolerance < 0.0:
+            raise ValueError('pose_stamp_tolerance must be >= 0')
 
     def now(self):
         return self.get_clock().now()
@@ -208,27 +233,41 @@ class PressButton(Node):
         self.current_pose_time = self.now()
 
     def on_button_pose(self, msg):
-        if self.phase not in (PHASE_CLOSE_GRIPPER, PHASE_WAIT_POSE):
-            return
         values = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z,
                   msg.pose.orientation.x, msg.pose.orientation.y,
                   msg.pose.orientation.z, msg.pose.orientation.w]
         if not all(math.isfinite(value) for value in values):
             return
         stamp = (msg.header.stamp.sec, msg.header.stamp.nanosec)
-        if self.first_pose_stamp is None:
-            self.first_pose_stamp = stamp
-            if self.elapsed(self.node_start_time) < self.latch_ignore_window:
-                self.baseline_stamp = stamp
-                self.get_logger().info(
-                    'ignored latched button pose %d.%09d; waiting for a new detection'
-                    % stamp)
-                return
-        if self.baseline_stamp is not None and stamp == self.baseline_stamp:
+        self.last_pose_stamp = stamp
+        if self.phase != PHASE_WAIT_POSE or not self.trigger_sent:
+            return
+        if (self.trigger_baseline_stamp is not None and
+                stamp == self.trigger_baseline_stamp):
+            self.get_logger().info(
+                'ignored button pose from before the current trigger %d.%09d'
+                % stamp)
+            return
+        try:
+            validate_capture_pose_metadata(
+                msg.header.frame_id, msg.header.stamp.sec,
+                msg.header.stamp.nanosec, self.expected_button_frame,
+                self.trigger_stamp_ns, self.pose_stamp_tolerance)
+        except ValueError as exc:
+            self.fail(1, 'invalid button pose: %s' % exc)
             return
         self.pending_pose = msg
         self.pending_pose_time = self.now()
         self.get_logger().info('received button pose %d.%09d' % stamp)
+
+    def on_capture_success(self, msg):
+        if self.phase != PHASE_WAIT_POSE or not self.trigger_sent:
+            return
+        self.capture_result = bool(msg.data)
+        if not self.capture_result:
+            self.fail(1, 'vision capture reported failure')
+            return
+        self.get_logger().info('vision capture reported success')
 
     def on_movel_result(self, msg):
         self.movel_result = bool(msg.data)
@@ -333,32 +372,66 @@ class PressButton(Node):
     def enter_wait_pose(self):
         self.phase = PHASE_WAIT_POSE
         self.phase_start = self.now()
+        self.pending_pose = None
+        self.pending_pose_time = None
+        self.trigger_baseline_stamp = None
+        self.trigger_stamp_ns = None
+        self.trigger_sent = False
+        self.capture_result = None
+        self.capture_wait_start = None
         if self.trigger_on_start:
+            self.get_logger().info(
+                'waiting for a vision subscriber on %s' % self.trigger_topic)
+        else:
+            self.start_capture_wait(False)
+            self.get_logger().info(
+                'waiting for an external capture trigger and fresh result')
+
+    def start_capture_wait(self, publish_trigger):
+        now = self.now()
+        self.pending_pose = None
+        self.pending_pose_time = None
+        self.capture_result = None
+        self.trigger_baseline_stamp = self.last_pose_stamp
+        self.trigger_stamp_ns = now.nanoseconds
+        self.capture_wait_start = now
+        self.trigger_sent = True
+        if publish_trigger:
             msg = Bool()
             msg.data = True
             self.trigger_pub.publish(msg)
-            subscriber_count = self.trigger_pub.get_subscription_count()
-            if subscriber_count == 0:
-                self.get_logger().warn(
-                    'capture trigger published on %s but no subscriber was found; '
-                    'check that the vision node is running and ROS_DOMAIN_ID matches'
-                    % self.trigger_topic)
-            else:
-                self.get_logger().info(
-                    'capture trigger published on %s (%d subscriber)'
-                    % (self.trigger_topic, subscriber_count))
-        self.get_logger().info('waiting for a fresh button pose')
+            self.get_logger().info(
+                'capture trigger published on %s (%d subscriber)'
+                % (self.trigger_topic,
+                   self.trigger_pub.get_subscription_count()))
+        self.get_logger().info(
+            'waiting for capture_success=true and a fresh button pose')
 
     def tick_wait_pose(self):
-        if self.pending_pose is not None:
+        if not self.trigger_sent:
+            subscriber_count = self.trigger_pub.get_subscription_count()
+            if subscriber_count > 0:
+                self.start_capture_wait(True)
+            elif self.elapsed(self.phase_start) > self.vision_wait_timeout:
+                self.fail(
+                    1,
+                    'vision not ready: no subscriber on %s within %.1fs'
+                    % (self.trigger_topic, self.vision_wait_timeout))
+            return
+        if self.capture_result is True and self.pending_pose is not None:
             self.capture_start = self.now()
             self.stationary_reference = None
             self.stationary_reference_time = None
             self.phase = PHASE_CAPTURE
-            self.get_logger().info('button pose available; capturing flange pose')
+            self.get_logger().info(
+                'vision handshake complete; capturing flange pose')
             return
-        if self.elapsed(self.phase_start) > self.pose_wait_timeout:
-            self.fail(1, 'no button pose within %.1fs' % self.pose_wait_timeout)
+        if self.elapsed(self.capture_wait_start) > self.pose_wait_timeout:
+            if self.capture_result is True:
+                message = 'capture succeeded but no fresh button pose was received'
+            else:
+                message = 'no vision capture result was received'
+            self.fail(1, '%s within %.1fs' % (message, self.pose_wait_timeout))
 
     def tick_capture(self):
         if (self.current_pose is None or self.current_pose_time is None or
