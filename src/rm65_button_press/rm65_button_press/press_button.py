@@ -170,6 +170,8 @@ class PressButton(Node):
         self.segment_target_matrix = None
         self.segment_position_tolerance = None
         self.segment_start = None
+        self.motion_active = False
+        self.stop_sent = False
 
         self.stationary_reference = None
         self.stationary_reference_time = None
@@ -539,6 +541,8 @@ class PressButton(Node):
         self.segment_target_matrix = quaternion_to_matrix(quaternion)
         self.segment_position_tolerance = float(position_tolerance)
         self.segment_start = self.now()
+        self.motion_active = True
+        self.stop_sent = False
         self.movel_pub.publish(msg)
         self.get_logger().info(
             'Movel -> (%.4f, %.4f, %.4f) speed=%d%% tolerance=%.1fmm' % (
@@ -577,9 +581,9 @@ class PressButton(Node):
     def tick_segment(self, phase, timeout, label, on_done, failure_code):
         status = self.segment_status(timeout)
         if status == 'done':
+            self.motion_active = False
             on_done()
         elif status in ('rejected', 'timeout'):
-            self.stop_motion()
             self.fail(failure_code, '%s move %s' % (label, status))
 
     def on_standoff_reached(self):
@@ -600,11 +604,14 @@ class PressButton(Node):
     def tick_press(self):
         status = self.segment_status(self.press_timeout)
         if status == 'done':
+            self.motion_active = False
             self.phase = PHASE_HOLD
             self.phase_start = self.now()
         elif status in ('rejected', 'timeout'):
-            self.get_logger().error('press move %s; retreating to standoff' % status)
-            self.start_retreat('press_failure')
+            self.fail(
+                1,
+                'press move %s; motion stopped without automatic retreat'
+                % status)
 
     def tick_hold(self):
         if self.elapsed(self.phase_start) >= self.hold_time:
@@ -617,10 +624,6 @@ class PressButton(Node):
         self.phase = PHASE_RETREAT_STANDOFF
 
     def on_retreat_reached(self):
-        if self.retreat_reason == 'press_failure':
-            self.get_logger().error('press failed; retreated to standoff; exit 1')
-            self.exit_code = 1
-            return
         self.send_movel(self.targets.return_position,
                         self.targets.return_orientation, self.retreat_speed,
                         self.position_tolerance)
@@ -630,15 +633,32 @@ class PressButton(Node):
         self.get_logger().info('returned to detect pose; exit 0')
         self.exit_code = 0
 
-    def stop_motion(self):
+    def safe_stop(self, reason):
+        if not self.motion_active or self.stop_sent:
+            return False
+        self.stop_sent = True
         msg = Bool()
         msg.data = True
-        self.move_stop_pub.publish(msg)
-        self.get_logger().warn('move_stop published')
+        subscriber_count = self.move_stop_pub.get_subscription_count()
+        try:
+            self.move_stop_pub.publish(msg)
+        except Exception as exc:  # noqa: BLE001 - best effort during shutdown
+            self.get_logger().error('failed to publish move_stop: %s' % exc)
+            return False
+        if subscriber_count == 0:
+            self.get_logger().error(
+                'move_stop published but no driver subscriber was found: %s'
+                % reason)
+        else:
+            self.get_logger().warn(
+                'move_stop published (%d subscriber): %s'
+                % (subscriber_count, reason))
+        return True
 
     def fail(self, code, message):
         self.get_logger().error(message)
         if self.exit_code is None:
+            self.safe_stop(message)
             self.exit_code = code
 
 
@@ -649,7 +669,15 @@ def main(args=None):
         while rclpy.ok() and node.exit_code is None:
             rclpy.spin_once(node, timeout_sec=0.05)
     except KeyboardInterrupt:
-        pass
+        node.exit_code = 130
+        node.safe_stop('keyboard interrupt')
+    except Exception as exc:  # noqa: BLE001 - stop before leaving the process
+        node.get_logger().error('executor exception: %s' % exc)
+        node.exit_code = 1
+        node.safe_stop('executor exception')
+    if node.stop_sent and rclpy.ok():
+        for _ in range(3):
+            rclpy.spin_once(node, timeout_sec=0.05)
     exit_code = node.exit_code if node.exit_code is not None else 1
     node.destroy_node()
     if rclpy.ok():
