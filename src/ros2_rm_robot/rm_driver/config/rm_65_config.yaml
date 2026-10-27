@@ -1,0 +1,23 @@
+rm_driver:
+  ros__parameters:
+    #robot param
+    arm_ip: "192.168.144.65"        #设置TCP连接时的IP
+    tcp_port: 8080                #设置TCP连接时的端口
+    
+    arm_type: "RM_65"             #机械臂型号设置       
+    arm_dof: 6                    #机械臂自由度设置
+
+    udp_ip: "192.168.144.78"        #设置udp主动上报IP
+    udp_cycle: 5                  #udp主动上报周期，需要是5的倍数。  
+    udp_port: 8089                #设置udp主动上报端口   
+    udp_force_coordinate: 0       #设置系统受力时六维力的基准坐标，0为传感器坐标系 1为当前工作坐标系 2为当前工具坐标系
+
+    # 因时 Inspire EG2-4C2/S4C2 平行夹爪（话题/参数沿用 ctag_* 命名）
+    # 末端 RS485/Modbus RTU：寄存器 10=位置(0=闭合,1000=张开), 11=速度(0-1000), 12=力(0-1000)
+    # speed/force 参数按 1-100% 配置，驱动内乘以 10
+    ctag_gripper_enabled: true
+    ctag_gripper_baudrate: 115200
+    ctag_gripper_timeout: 2
+    ctag_gripper_slave_id: 1
+    ctag_gripper_speed_percent: 50
+    ctag_gripper_force_percent: 50

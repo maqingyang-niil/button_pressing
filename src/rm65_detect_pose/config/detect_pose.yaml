@@ -1,0 +1,14 @@
+move_to_pose:
+  ros__parameters:
+    # Taught cabinet-button detection pose, read from the RM65-BI controller
+    # via the rm_driver /joint_states and /rm_driver/udp_arm_position topics.
+    # joint6 is -184.278 deg (a valid multi-turn value for this controller).
+    # Raw joint readings (0.001 deg): [795, -34139, 128510, 91412, -961, -184278]
+    # Cartesian pose at the same moment: p=(-209.258, -0.480, 425.219) mm,
+    #   q=(-0.506120, -0.531328, 0.467096, 0.493308) (x, y, z, w).
+    joint_degrees: [0.795, -34.139, 128.510, 91.412, -0.961, -184.278]
+    speed: 10
+    delay: 2.0
+    tolerance_deg: 0.5
+    timeout: 60.0
+    driver_wait_timeout: 20.0

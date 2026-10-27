@@ -1,0 +1,10 @@
+move_to_pose:
+  ros__parameters:
+    # 腕部翻转检测位姿：与示教检测位同一个法兰位姿，joint4 远离 +限位
+    joint_degrees: [2.329, -55.776, 114.992, -8.482, 39.033, -89.151]
+    speed: 10
+    delay: 2.0
+    tolerance_deg: 0.5
+    timeout: 60.0
+    driver_wait_timeout: 20.0
+    trigger_enabled: false

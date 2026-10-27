@@ -1,0 +1,40 @@
+sim_scene:
+  ros__parameters:
+    use_sim_time: true
+    base_frame: base_link
+    # 2026-10-27 11:08 实机视觉检测结果（base_link）
+    button_position: [-0.528318, -0.011903, 0.449387]
+    button_orientation: [0.523668, 0.507346, 0.497898, 0.469542]
+    tool_offset: 0.143
+    marker_topic: /button_press_sim/button_markers
+    spawn_model_name: button_panel
+    spawn_service: /spawn_entity
+
+sim_vision:
+  ros__parameters:
+    use_sim_time: true
+    base_frame: base_link
+    button_position: [-0.528318, -0.011903, 0.449387]
+    button_orientation: [0.523668, 0.507346, 0.497898, 0.469542]
+    trigger_topic: /ibvs/capture_trigger
+    button_pose_topic: /ibvs/button_pose
+    status_topic: /ibvs/capture_success
+    settle_duration: 0.5
+
+sim_driver:
+  ros__parameters:
+    use_sim_time: true
+    group_name: rm_group
+    base_link: base_link
+    ee_link: Link6
+    joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
+    # 2026-10-27 11:01 最新默认检测位姿（实机 /joint_states）
+    initial_joints_deg: [0.795, -34.139, 128.510, 91.412, -0.961, -184.278]
+    initial_move_delay: 3.0
+    initial_max_attempts: 10
+    initial_retry_period: 5.0
+    move_timeout: 60.0
+    cartesian_max_step: 0.005
+    cartesian_fraction_threshold: 0.8
+    position_tolerance: 0.003
+    orientation_tolerance_deg: 2.0

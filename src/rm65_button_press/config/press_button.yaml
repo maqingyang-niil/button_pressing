@@ -1,0 +1,52 @@
+press_button:
+  ros__parameters:
+    button_pose_topic: /ibvs/button_pose
+    current_pose_topic: /rm_driver/udp_arm_position
+    movel_cmd_topic: /rm_driver/movel_cmd
+    movel_result_topic: /rm_driver/movel_result
+    move_stop_topic: /rm_driver/move_stop_cmd
+    ctag_cmd_topic: /rm_driver/set_ctag_gripper_position_cmd
+    ctag_result_topic: /rm_driver/set_ctag_gripper_position_result
+    trigger_topic: /ibvs/capture_trigger
+    # 进入等待位姿后自己发一次触发，让视觉在检测位姿下重新检测
+    trigger_on_start: true
+
+    # 法兰 -> 闭合夹爪指尖前端，沿工具 +Z（URDF S4C2 网格实测）
+    tool_offset: 0.143
+    # 指尖到按钮表面的预按距离
+    standoff_distance: 0.10
+    # 指尖越过按钮表面的按压深度
+    press_depth: 0.005
+
+    approach_speed: 10
+    press_speed: 3
+    retreat_speed: 10
+
+    position_tolerance: 0.003
+    press_position_tolerance: 0.005
+    orientation_tolerance_deg: 2.0
+
+    settle_time: 0.5
+    hold_time: 0.4
+
+    driver_wait_timeout: 20.0
+    pose_wait_timeout: 120.0
+    move_timeout: 30.0
+    press_timeout: 20.0
+    stationary_timeout: 3.0
+
+    latch_ignore_window: 0.5
+    max_flange_radius: 0.8
+    max_normal_tilt_deg: 35.0
+    min_button_distance: 0.15
+    max_button_distance: 0.80
+
+    gripper_close_enabled: false
+    gripper_close_position: 0
+    gripper_close_repeats: 1
+    gripper_close_interval: 0.2
+    gripper_close_timeout: 8.0
+    gripper_settle_time: 1.0
+
+    dry_run: false
+    approach_only: false

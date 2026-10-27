@@ -1,0 +1,20 @@
+# ROS 2 / colcon generated directories
+/build/
+/install/
+/log/
+/logs/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Editor and temporary files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Runtime-generated button pose
+/button_pose_latest.json
