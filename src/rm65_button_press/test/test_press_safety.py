@@ -1,6 +1,14 @@
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 
-from rm65_button_press.press_button import PressButton
+from rm65_button_press.press_button import (
+    PHASE_MOVE_STANDOFF,
+    PHASE_RESTORE_ORIENTATION,
+    PHASE_RETURN_POSITION,
+    PressButton,
+)
 
 
 class FakePublisher:
@@ -77,3 +85,44 @@ def test_press_failure_stops_instead_of_starting_retreat():
 
     assert node.exit_code == 1
     assert len(node.move_stop_pub.messages) == 1
+
+
+def test_alignment_completion_starts_standoff_move():
+    node = PressButton.__new__(PressButton)
+    node.targets = SimpleNamespace(standoff_position=np.array([0.2, 0.0, 0.4]))
+    node.tool_quaternion = np.array([0.0, 0.0, 0.0, 1.0])
+    node.approach_speed = 10
+    node.position_tolerance = 0.003
+    node.alignment_tolerance_deg = 2.0
+    calls = []
+    node.send_movel = lambda *args: calls.append(args)
+    node.get_logger = lambda: SimpleNamespace(info=lambda message: None)
+
+    node.on_align_reached()
+
+    assert node.phase == PHASE_MOVE_STANDOFF
+    assert np.allclose(calls[0][0], node.targets.standoff_position)
+    assert np.allclose(calls[0][1], node.tool_quaternion)
+
+
+def test_return_restores_position_before_orientation():
+    node = PressButton.__new__(PressButton)
+    node.targets = SimpleNamespace(
+        return_position=np.array([0.1, 0.0, 0.4]),
+        return_orientation=np.array([0.0, 0.0, 0.0, 1.0]),
+    )
+    node.tool_quaternion = np.array([0.0, 0.70710678, 0.0, 0.70710678])
+    node.retreat_speed = 10
+    node.align_speed = 3
+    node.position_tolerance = 0.003
+    node.alignment_tolerance_deg = 2.0
+    calls = []
+    node.send_movel = lambda *args: calls.append(args)
+
+    node.on_retreat_reached()
+    assert node.phase == PHASE_RETURN_POSITION
+    assert np.allclose(calls[-1][1], node.tool_quaternion)
+
+    node.on_return_position_reached()
+    assert node.phase == PHASE_RESTORE_ORIENTATION
+    assert np.allclose(calls[-1][1], node.targets.return_orientation)

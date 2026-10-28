@@ -24,6 +24,8 @@ def generate_launch_description():
                               description='Fingertip gap to the button surface (m)'),
         DeclareLaunchArgument('tool_offset', default_value='0.143',
                               description='Flange to closed fingertip front (m)'),
+        DeclareLaunchArgument('align_speed', default_value='3',
+                              description='In-place orientation alignment speed (1-100)'),
         DeclareLaunchArgument('approach_speed', default_value='10',
                               description='Standoff move speed (1-100)'),
         DeclareLaunchArgument('press_speed', default_value='3',
@@ -52,6 +54,8 @@ def generate_launch_description():
                     LaunchConfiguration('standoff_distance'), value_type=float),
                 'tool_offset': ParameterValue(
                     LaunchConfiguration('tool_offset'), value_type=float),
+                'align_speed': ParameterValue(
+                    LaunchConfiguration('align_speed'), value_type=int),
                 'approach_speed': ParameterValue(
                     LaunchConfiguration('approach_speed'), value_type=int),
                 'press_speed': ParameterValue(

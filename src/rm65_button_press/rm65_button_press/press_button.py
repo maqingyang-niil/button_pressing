@@ -23,12 +23,14 @@ PHASE_WAIT_DRIVER = 'WAIT_DRIVER'
 PHASE_CLOSE_GRIPPER = 'CLOSE_GRIPPER'
 PHASE_WAIT_POSE = 'WAIT_POSE'
 PHASE_CAPTURE = 'CAPTURE'
+PHASE_ALIGN = 'ALIGN'
 PHASE_MOVE_STANDOFF = 'MOVE_STANDOFF'
 PHASE_SETTLE = 'SETTLE'
 PHASE_PRESS = 'PRESS'
 PHASE_HOLD = 'HOLD'
 PHASE_RETREAT_STANDOFF = 'RETREAT_STANDOFF'
-PHASE_RETURN = 'RETURN'
+PHASE_RETURN_POSITION = 'RETURN_POSITION'
+PHASE_RESTORE_ORIENTATION = 'RESTORE_ORIENTATION'
 
 
 class PressButton(Node):
@@ -63,6 +65,7 @@ class PressButton(Node):
         self.standoff_distance = float(
             self.declare_parameter('standoff_distance', 0.10).value)
         self.press_depth = float(self.declare_parameter('press_depth', 0.005).value)
+        self.align_speed = int(self.declare_parameter('align_speed', 3).value)
         self.approach_speed = int(self.declare_parameter('approach_speed', 10).value)
         self.press_speed = int(self.declare_parameter('press_speed', 3).value)
         self.retreat_speed = int(self.declare_parameter('retreat_speed', 10).value)
@@ -73,6 +76,8 @@ class PressButton(Node):
             self.declare_parameter('press_position_tolerance', 0.005).value)
         self.orientation_tolerance_deg = float(
             self.declare_parameter('orientation_tolerance_deg', 2.0).value)
+        self.alignment_tolerance_deg = float(
+            self.declare_parameter('alignment_tolerance_deg', 2.0).value)
 
         self.settle_time = float(self.declare_parameter('settle_time', 0.5).value)
         self.hold_time = float(self.declare_parameter('hold_time', 0.4).value)
@@ -82,6 +87,7 @@ class PressButton(Node):
         self.pose_wait_timeout = float(
             self.declare_parameter('pose_wait_timeout', 120.0).value)
         self.move_timeout = float(self.declare_parameter('move_timeout', 30.0).value)
+        self.align_timeout = float(self.declare_parameter('align_timeout', 20.0).value)
         self.press_timeout = float(self.declare_parameter('press_timeout', 20.0).value)
         self.stationary_timeout = float(
             self.declare_parameter('stationary_timeout', 3.0).value)
@@ -97,6 +103,10 @@ class PressButton(Node):
             self.declare_parameter('min_button_distance', 0.15).value)
         self.max_button_distance = float(
             self.declare_parameter('max_button_distance', 0.80).value)
+        self.min_alignment_clearance = float(
+            self.declare_parameter('min_alignment_clearance', 0.05).value)
+        self.max_alignment_rotation_deg = float(
+            self.declare_parameter('max_alignment_rotation_deg', 60.0).value)
 
         self.gripper_close_enabled = bool(
             self.declare_parameter('gripper_close_enabled', True).value)
@@ -169,6 +179,7 @@ class PressButton(Node):
         self.segment_target_position = None
         self.segment_target_matrix = None
         self.segment_position_tolerance = None
+        self.segment_orientation_tolerance_deg = None
         self.segment_start = None
         self.motion_active = False
         self.stop_sent = False
@@ -182,9 +193,10 @@ class PressButton(Node):
         self.timer = self.create_timer(0.05, self.tick)
         self.get_logger().info(
             'press_button ready: dry_run=%s approach_only=%s '
-            'standoff=%.3f m press_depth=%.3f m tool_offset=%.3f m' % (
+            'standoff=%.3f m press_depth=%.3f m tool_offset=%.3f m '
+            'align_speed=%d%%' % (
                 self.dry_run, self.approach_only, self.standoff_distance,
-                self.press_depth, self.tool_offset))
+                self.press_depth, self.tool_offset, self.align_speed))
 
     def validate_parameters(self):
         if self.tool_offset < 0.0:
@@ -193,7 +205,8 @@ class PressButton(Node):
             raise ValueError('standoff_distance must be > 0')
         if self.press_depth < 0.0:
             raise ValueError('press_depth must be >= 0')
-        for name, value in (('approach_speed', self.approach_speed),
+        for name, value in (('align_speed', self.align_speed),
+                            ('approach_speed', self.approach_speed),
                             ('press_speed', self.press_speed),
                             ('retreat_speed', self.retreat_speed)):
             if not 1 <= value <= 100:
@@ -206,6 +219,16 @@ class PressButton(Node):
             raise ValueError('gripper_close_interval must be >= 0')
         if self.position_tolerance <= 0.0 or self.press_position_tolerance <= 0.0:
             raise ValueError('position tolerances must be > 0')
+        if self.orientation_tolerance_deg <= 0.0:
+            raise ValueError('orientation_tolerance_deg must be > 0')
+        if self.alignment_tolerance_deg <= 0.0:
+            raise ValueError('alignment_tolerance_deg must be > 0')
+        if self.align_timeout <= 0.0:
+            raise ValueError('align_timeout must be > 0')
+        if self.min_alignment_clearance < 0.0:
+            raise ValueError('min_alignment_clearance must be >= 0')
+        if not 0.0 < self.max_alignment_rotation_deg <= 180.0:
+            raise ValueError('max_alignment_rotation_deg must be within (0, 180]')
         if not self.capture_success_topic:
             raise ValueError('capture_success_topic must not be empty')
         if not self.expected_button_frame:
@@ -291,6 +314,9 @@ class PressButton(Node):
                 self.tick_wait_pose()
             elif self.phase == PHASE_CAPTURE:
                 self.tick_capture()
+            elif self.phase == PHASE_ALIGN:
+                self.tick_segment(PHASE_ALIGN, self.align_timeout,
+                                  'alignment', self.on_align_reached, 1)
             elif self.phase == PHASE_MOVE_STANDOFF:
                 self.tick_segment(PHASE_MOVE_STANDOFF, self.move_timeout,
                                   'standoff', self.on_standoff_reached, 1)
@@ -303,9 +329,14 @@ class PressButton(Node):
             elif self.phase == PHASE_RETREAT_STANDOFF:
                 self.tick_segment(PHASE_RETREAT_STANDOFF, self.move_timeout,
                                   'retreat', self.on_retreat_reached, 2)
-            elif self.phase == PHASE_RETURN:
-                self.tick_segment(PHASE_RETURN, self.move_timeout,
-                                  'return', self.on_return_reached, 2)
+            elif self.phase == PHASE_RETURN_POSITION:
+                self.tick_segment(PHASE_RETURN_POSITION, self.move_timeout,
+                                  'return position',
+                                  self.on_return_position_reached, 2)
+            elif self.phase == PHASE_RESTORE_ORIENTATION:
+                self.tick_segment(PHASE_RESTORE_ORIENTATION,
+                                  self.align_timeout, 'restore orientation',
+                                  self.on_return_reached, 2)
         except Exception as exc:  # noqa: BLE001 - keep the node from hanging on a bug
             self.get_logger().error('press_button exception: %s' % exc)
             self.fail(1, 'unhandled exception in state machine')
@@ -489,21 +520,23 @@ class PressButton(Node):
         self.log_targets(targets)
         errors = validate_press_targets(
             targets, self.max_flange_radius, self.max_normal_tilt_deg,
-            self.min_button_distance, self.max_button_distance)
+            self.min_button_distance, self.max_button_distance,
+            self.min_alignment_clearance, self.max_alignment_rotation_deg)
         if errors:
             self.fail(1, 'target validation failed: ' + '; '.join(errors))
             return
 
         self.targets = targets
-        self.tool_quaternion = normalize_quaternion(flange_orientation)
-        self.tool_matrix = quaternion_to_matrix(flange_orientation)
+        self.tool_quaternion = targets.aligned_orientation
+        self.tool_matrix = quaternion_to_matrix(targets.aligned_orientation)
         if self.dry_run:
             self.get_logger().info('dry_run: targets computed, no motion')
             self.exit_code = 0
             return
-        self.send_movel(targets.standoff_position, self.tool_quaternion,
-                        self.approach_speed, self.position_tolerance)
-        self.phase = PHASE_MOVE_STANDOFF
+        self.send_movel(targets.return_position, self.tool_quaternion,
+                        self.align_speed, self.position_tolerance,
+                        self.alignment_tolerance_deg)
+        self.phase = PHASE_ALIGN
 
     def log_targets(self, targets):
         def fmt(vector):
@@ -522,8 +555,12 @@ class PressButton(Node):
                 targets.standoff_radius, targets.press_radius,
                 float(np.linalg.norm(targets.press_position -
                                      targets.standoff_position))))
+        self.get_logger().info(
+            'alignment rotation=%.2fdeg sweep_clearance=%.4fm' % (
+                targets.alignment_angle_deg, targets.rotation_clearance))
 
-    def send_movel(self, position, quaternion, speed, position_tolerance):
+    def send_movel(self, position, quaternion, speed, position_tolerance,
+                   orientation_tolerance_deg=None):
         quaternion = normalize_quaternion(quaternion)
         msg = Movel()
         msg.pose.position.x = float(position[0])
@@ -540,6 +577,9 @@ class PressButton(Node):
         self.segment_target_position = np.asarray(position, dtype=float)
         self.segment_target_matrix = quaternion_to_matrix(quaternion)
         self.segment_position_tolerance = float(position_tolerance)
+        self.segment_orientation_tolerance_deg = float(
+            self.orientation_tolerance_deg if orientation_tolerance_deg is None
+            else orientation_tolerance_deg)
         self.segment_start = self.now()
         self.motion_active = True
         self.stop_sent = False
@@ -566,7 +606,7 @@ class PressButton(Node):
                                   current.orientation.z, current.orientation.w)),
             self.segment_target_matrix)
         if (position_error <= self.segment_position_tolerance and
-                rotation_error <= self.orientation_tolerance_deg):
+                rotation_error <= self.segment_orientation_tolerance_deg):
             self.get_logger().info(
                 'reached target: position_error=%.1fmm orientation_error=%.2fdeg'
                 % (position_error * 1000.0, rotation_error))
@@ -589,6 +629,14 @@ class PressButton(Node):
     def on_standoff_reached(self):
         self.phase = PHASE_SETTLE
         self.phase_start = self.now()
+
+    def on_align_reached(self):
+        self.get_logger().info(
+            'tool +Z aligned with button approach within %.2fdeg'
+            % self.alignment_tolerance_deg)
+        self.send_movel(self.targets.standoff_position, self.tool_quaternion,
+                        self.approach_speed, self.position_tolerance)
+        self.phase = PHASE_MOVE_STANDOFF
 
     def tick_settle(self):
         if self.elapsed(self.phase_start) < self.settle_time:
@@ -625,9 +673,16 @@ class PressButton(Node):
 
     def on_retreat_reached(self):
         self.send_movel(self.targets.return_position,
-                        self.targets.return_orientation, self.retreat_speed,
+                        self.tool_quaternion, self.retreat_speed,
                         self.position_tolerance)
-        self.phase = PHASE_RETURN
+        self.phase = PHASE_RETURN_POSITION
+
+    def on_return_position_reached(self):
+        self.send_movel(self.targets.return_position,
+                        self.targets.return_orientation, self.align_speed,
+                        self.position_tolerance,
+                        self.alignment_tolerance_deg)
+        self.phase = PHASE_RESTORE_ORIENTATION
 
     def on_return_reached(self):
         self.get_logger().info('returned to detect pose; exit 0')

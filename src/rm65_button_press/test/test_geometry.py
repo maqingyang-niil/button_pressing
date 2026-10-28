@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from rm65_button_press.geometry import (
+    compute_aligned_orientation,
     compute_press_targets,
     matrix_to_quaternion,
     normalize_quaternion,
@@ -57,6 +58,45 @@ def test_compute_targets_aligned_horizontal_case():
                        matrix_to_quaternion(TOOL_MATRIX))
     assert math.isclose(targets.button_distance, 0.4, abs_tol=1e-9)
     assert math.isclose(targets.normal_tilt_deg, 0.0, abs_tol=1e-9)
+    assert math.isclose(targets.alignment_angle_deg, 0.0, abs_tol=1e-9)
+    assert math.isclose(targets.rotation_clearance, 0.257, abs_tol=1e-9)
+
+
+def test_alignment_points_tool_positive_z_into_button():
+    aligned = quaternion_to_matrix(compute_aligned_orientation(
+        matrix_to_quaternion(BUTTON_MATRIX),
+        (0.0, 0.0, 0.0, 1.0),
+    ))
+
+    assert np.allclose(aligned[:, 2], [1.0, 0.0, 0.0], atol=1e-9)
+    assert np.isclose(np.linalg.det(aligned), 1.0, atol=1e-9)
+
+
+def test_alignment_handles_opposite_tool_and_approach_axes():
+    aligned = quaternion_to_matrix(compute_aligned_orientation(
+        (0.0, 0.0, 0.0, 1.0),
+        (0.0, 0.0, 0.0, 1.0),
+    ))
+
+    assert np.allclose(aligned[:, 0], [1.0, 0.0, 0.0], atol=1e-9)
+    assert np.allclose(aligned[:, 2], [0.0, 0.0, -1.0], atol=1e-9)
+
+
+def test_target_positions_use_aligned_orientation_not_initial_orientation():
+    targets = compute_press_targets(
+        (0.5, 0.0, 0.4),
+        matrix_to_quaternion(BUTTON_MATRIX),
+        (0.1, 0.0, 0.4),
+        (0.0, 0.0, 0.0, 1.0),
+        0.143,
+        0.1,
+        0.005,
+    )
+
+    assert np.allclose(targets.tip_offset, [0.143, 0.0, 0.0], atol=1e-9)
+    assert np.allclose(targets.standoff_position, [0.257, 0.0, 0.4])
+    assert np.allclose(targets.press_position, [0.362, 0.0, 0.4])
+    assert math.isclose(targets.alignment_angle_deg, 90.0, abs_tol=1e-9)
 
 
 def test_validate_accepts_horizontal_case():
@@ -90,6 +130,26 @@ def test_validate_rejects_reach():
     targets = horizontal_targets(button_position=(0.65, 0.0, 0.4))
     errors = validate_press_targets(targets, 0.61, 35.0, 0.15, 0.80)
     assert any("radius" in error for error in errors)
+
+
+def test_validate_rejects_unsafe_alignment_sweep():
+    targets = horizontal_targets(flange_position=(0.31, 0.0, 0.4))
+    errors = validate_press_targets(targets, 0.61, 35.0, 0.15, 0.80)
+    assert any("sweep clearance" in error for error in errors)
+
+
+def test_validate_rejects_excessive_alignment_rotation():
+    targets = compute_press_targets(
+        (0.5, 0.0, 0.4),
+        matrix_to_quaternion(BUTTON_MATRIX),
+        (0.1, 0.0, 0.4),
+        (0.0, 0.0, 0.0, 1.0),
+        0.143,
+        0.1,
+        0.005,
+    )
+    errors = validate_press_targets(targets, 0.61, 35.0, 0.15, 0.80)
+    assert any("alignment rotation" in error for error in errors)
 
 
 def test_rotation_angle_deg():

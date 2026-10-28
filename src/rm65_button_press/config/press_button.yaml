@@ -20,6 +20,8 @@ press_button:
     # 指尖越过按钮表面的按压深度
     press_depth: 0.005
 
+    # 先在检测位原地低速旋转，使 link6/tool +Z 对准按钮按压方向（-法线）
+    align_speed: 3
     approach_speed: 10
     press_speed: 3
     retreat_speed: 10
@@ -27,6 +29,7 @@ press_button:
     position_tolerance: 0.003
     press_position_tolerance: 0.005
     orientation_tolerance_deg: 2.0
+    alignment_tolerance_deg: 2.0
 
     settle_time: 0.5
     hold_time: 0.4
@@ -34,6 +37,7 @@ press_button:
     driver_wait_timeout: 20.0
     pose_wait_timeout: 120.0
     move_timeout: 30.0
+    align_timeout: 20.0
     press_timeout: 20.0
     stationary_timeout: 3.0
     vision_wait_timeout: 10.0
@@ -43,6 +47,10 @@ press_button:
     max_normal_tilt_deg: 35.0
     min_button_distance: 0.15
     max_button_distance: 0.80
+    # 原地旋转时，以法兰为球心、tool_offset为半径的保守扫掠间隙
+    min_alignment_clearance: 0.05
+    # 检测位需要旋转过大时拒绝动作，避免错误法线或不可预期的大幅转腕
+    max_alignment_rotation_deg: 60.0
 
     gripper_close_enabled: false
     gripper_close_position: 0

@@ -11,6 +11,7 @@ class PressTargets:
     button_position: np.ndarray
     button_normal: np.ndarray
     approach: np.ndarray
+    aligned_orientation: np.ndarray
     tip_offset: np.ndarray
     standoff_position: np.ndarray
     press_position: np.ndarray
@@ -18,6 +19,8 @@ class PressTargets:
     return_orientation: np.ndarray
     button_distance: float
     normal_tilt_deg: float
+    alignment_angle_deg: float
+    rotation_clearance: float
     standoff_radius: float
     press_radius: float
 
@@ -84,6 +87,40 @@ def rotation_angle_deg(matrix_a: np.ndarray, matrix_b: np.ndarray) -> float:
     return math.degrees(math.acos(float(np.clip(cosine, -1.0, 1.0))))
 
 
+def compute_aligned_orientation(button_orientation,
+                                flange_orientation) -> np.ndarray:
+    """Rotate tool +Z into the button using the shortest 3-D rotation."""
+    button_matrix = quaternion_to_matrix(button_orientation)
+    flange_matrix = quaternion_to_matrix(flange_orientation)
+    z_target = -button_matrix[:, 2]
+    z_current = flange_matrix[:, 2]
+    cosine = float(np.clip(np.dot(z_current, z_target), -1.0, 1.0))
+    cross = np.cross(z_current, z_target)
+    sine = float(np.linalg.norm(cross))
+
+    if sine < 1e-9:
+        if cosine > 0.0:
+            delta = np.eye(3)
+        else:
+            # The axes are opposite. Rotate 180 degrees around current tool X;
+            # it is guaranteed to be perpendicular to current tool Z.
+            axis = flange_matrix[:, 0]
+            delta = 2.0 * np.outer(axis, axis) - np.eye(3)
+    else:
+        axis = cross / sine
+        skew = np.array([
+            [0.0, -axis[2], axis[1]],
+            [axis[2], 0.0, -axis[0]],
+            [-axis[1], axis[0], 0.0],
+        ])
+        delta = np.eye(3) + sine * skew + (1.0 - cosine) * (skew @ skew)
+
+    # Apply only the shortest alignment rotation. This preserves the current
+    # roll instead of copying the visually noisy rotation about the normal.
+    aligned_matrix = delta @ flange_matrix
+    return matrix_to_quaternion(aligned_matrix)
+
+
 def compute_press_targets(button_position, button_orientation, flange_position,
                           flange_orientation, tool_offset, standoff_distance,
                           press_depth) -> PressTargets:
@@ -95,21 +132,28 @@ def compute_press_targets(button_position, button_orientation, flange_position,
         raise ValueError("tool_offset/standoff_distance/press_depth are invalid")
 
     button_matrix = quaternion_to_matrix(button_orientation)
-    flange_matrix = quaternion_to_matrix(flange_orientation)
     button_normal = button_matrix[:, 2].copy()
     approach = -button_normal
-    tip_offset = flange_matrix @ np.array([0.0, 0.0, float(tool_offset)])
+    flange_matrix = quaternion_to_matrix(flange_orientation)
+    aligned_orientation = compute_aligned_orientation(
+        button_orientation, flange_orientation)
+    aligned_matrix = quaternion_to_matrix(aligned_orientation)
+    tip_offset = aligned_matrix @ np.array([0.0, 0.0, float(tool_offset)])
 
     standoff_position = s - float(standoff_distance) * approach - tip_offset
     press_position = s + float(press_depth) * approach - tip_offset
     normal_tilt_deg = math.degrees(
         math.asin(float(np.clip(abs(approach[2]), 0.0, 1.0))))
     button_distance = float(np.linalg.norm(s - f))
+    alignment_angle_deg = rotation_angle_deg(flange_matrix, aligned_matrix)
+    plane_distance = float(np.dot(button_normal, f - s))
+    rotation_clearance = plane_distance - float(tool_offset)
 
     return PressTargets(
         button_position=s,
         button_normal=button_normal,
         approach=approach,
+        aligned_orientation=aligned_orientation,
         tip_offset=tip_offset,
         standoff_position=standoff_position,
         press_position=press_position,
@@ -117,6 +161,8 @@ def compute_press_targets(button_position, button_orientation, flange_position,
         return_orientation=normalize_quaternion(flange_orientation),
         button_distance=button_distance,
         normal_tilt_deg=normal_tilt_deg,
+        alignment_angle_deg=alignment_angle_deg,
+        rotation_clearance=rotation_clearance,
         standoff_radius=float(np.linalg.norm(standoff_position)),
         press_radius=float(np.linalg.norm(press_position)),
     )
@@ -124,10 +170,13 @@ def compute_press_targets(button_position, button_orientation, flange_position,
 
 def validate_press_targets(targets: PressTargets, max_flange_radius: float,
                            max_normal_tilt_deg: float, min_button_distance: float,
-                           max_button_distance: float) -> list[str]:
+                           max_button_distance: float,
+                           min_alignment_clearance: float = 0.05,
+                           max_alignment_rotation_deg: float = 60.0) -> list[str]:
     errors: list[str] = []
     vectors = [targets.button_position, targets.button_normal, targets.approach,
-               targets.tip_offset, targets.standoff_position, targets.press_position,
+               targets.aligned_orientation, targets.tip_offset,
+               targets.standoff_position, targets.press_position,
                targets.return_position, targets.return_orientation]
     if not all(np.all(np.isfinite(vector)) for vector in vectors):
         return ["targets contain non-finite values"]
@@ -151,6 +200,16 @@ def validate_press_targets(targets: PressTargets, max_flange_radius: float,
         errors.append(
             f"button normal tilt {targets.normal_tilt_deg:.1f} deg exceeds "
             f"{max_normal_tilt_deg:.1f} deg")
+
+    if targets.rotation_clearance < min_alignment_clearance:
+        errors.append(
+            f"alignment sweep clearance {targets.rotation_clearance:.3f} m "
+            f"is below {min_alignment_clearance:.3f} m")
+
+    if targets.alignment_angle_deg > max_alignment_rotation_deg:
+        errors.append(
+            f"alignment rotation {targets.alignment_angle_deg:.1f} deg exceeds "
+            f"{max_alignment_rotation_deg:.1f} deg")
 
     if targets.standoff_radius > max_flange_radius:
         errors.append(
